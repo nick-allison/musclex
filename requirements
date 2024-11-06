@@ -1,5 +1,6 @@
 pip
 wheel
+copy
 numpy==1.26.4
 Cython<=0.29.37
 scikit-image

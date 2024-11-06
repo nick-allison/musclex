@@ -50,6 +50,8 @@ from .ImageMaskTool import ImageMaskerWindow
 from ..CalibrationSettings import CalibrationSettings
 from threading import Lock
 
+from copy import deepcopy
+
 class QuadFoldParams:
     def __init__(self, flags, fileName, filePath, ext, fileList, parent):
         self.flags = flags
@@ -68,30 +70,49 @@ class WorkerSignals(QObject):
 
 class Worker(QRunnable):
 
-    def __init__(self, params):
+    def __init__(self, params, fixedCenterChecked, calib_center):
         super().__init__()
         self.flags = params.flags
         self.params = params
         self.signals = WorkerSignals()
         self.lock = Lock()
-        
+
+        #Nick Allison:
+        #These are used to make the fixed center functionality work.  
+        # Pass in whether the fixed center checkbox is clicked
+        self.fixedCenterChecked = fixedCenterChecked
+        #The center from the previous image
+        self.calib_center = calib_center
+
     @Slot()
     def run(self):
         try:
             self.quadFold = QuadrantFolder(self.params.filePath, self.params.fileName, self.params.parent, self.params.fileList, self.params.ext)
             self.quadFold.info = {}
+
+            #Nick Allison:
+            #If the fixedCenter box is checked, then make the center for this image the same
+            #as the center for the last image to be processed.
+            if self.fixedCenterChecked and self.calib_center is not None:
+                self.quadFold = deepcopy(self.quadFold) #This line is needed to avoid a lot of problms that can happen when multiple threads try using the same quadfold object.
+                self.quadFold.info['calib_center'] = self.calib_center
+
             self.quadFold.process(self.flags)
+
             if self.lock is not None:
                 self.lock.acquire()
             with open(self.quadFold.img_path + "/qf_results/tasks_done.txt", "a") as file:
                 file.write(self.quadFold.img_name + " saving image"+ "\n")
             if self.lock is not None:
                 self.lock.release()
+
         except:
             traceback.print_exc()
             self.signals.error.emit((traceback.format_exc()))
+
         else:
             self.signals.result.emit(self.quadFold)
+
         finally:
             self.signals.finished.emit()
 
@@ -299,6 +320,9 @@ class QuadrantFoldingGUI(QMainWindow):
         self.toggleFoldImage = QCheckBox("Fold Image")
         self.toggleFoldImage.setChecked(True)
 
+        self.toggleFixOrientation = QCheckBox("Fix Orientation")
+        self.toggleFixOrientation.setChecked(False)
+
         self.settingsLayout.addWidget(self.calibrationButton, 0, 0, 1, 4)
         self.settingsLayout.addWidget(self.setCentByChords, 1, 0, 1, 2)
         self.settingsLayout.addWidget(self.setCentByPerp, 1, 2, 1, 2)
@@ -315,6 +339,7 @@ class QuadrantFoldingGUI(QMainWindow):
         self.settingsLayout.addWidget(self.cropFoldedImageChkBx, 8, 0, 1, 4)
         self.settingsLayout.addWidget(self.doubleZoom, 9, 0, 1, 4)
         self.settingsLayout.addWidget(self.toggleFoldImage, 10, 0, 1, 4)
+        self.settingsLayout.addWidget(self.toggleFixOrientation, 11, 0, 1, 4)
 
         # Blank Image Settings
         self.blankImageGrp = QGroupBox("Enable Blank Image and Mask")
@@ -793,6 +818,7 @@ class QuadrantFoldingGUI(QMainWindow):
         self.toggleFoldImage.stateChanged.connect(self.onFoldChkBoxToggled)
         self.cropFoldedImageChkBx.stateChanged.connect(self.cropFoldedImageChanged)
         self.compressFoldedImageChkBx.stateChanged.connect(self.compressFoldedImageChanged)
+        self.toggleFixOrientation.stateChanged.connect(self.fixOrientationChanged)
         # self.expandImage.stateChanged.connect(self.expandImageChecked)
 
         self.selectImageButton.clicked.connect(self.browseFile)
@@ -2439,6 +2465,9 @@ class QuadrantFoldingGUI(QMainWindow):
             self.quadFold.deleteFromDict(self.quadFold.imgCache, 'BgSubFold')
             self.processImage()
 
+    def fixOrientationChanged(self):
+        pass
+
     def closeEvent(self, ev):
         """
         Close the event
@@ -2678,19 +2707,31 @@ class QuadrantFoldingGUI(QMainWindow):
             
     def thread_done(self, quadFold):
         
+        #DEBUG
+        print("THREAD DONE FUNCTION")
+
         if self.lock is not None:
+            #DEBUG
+            print("LOCK ACQUIRE")
             self.lock.acquire()
             
         self.quadFold = quadFold
             
         self.onProcessingFinished()
         
+        #Debug
+        print("Try to Release Lock")
+        print(self.lock)
         if self.lock is not None:
+            print("LOCK RELEASE")
             self.lock.release()
     
     # placeholder method
     def thread_finished(self):
         
+        #DEBUG
+        print("THREAD FINISHED FUNCTION")
+
         self.tasksDone += 1
         self.progressBar.setValue(int(100. / self.numberOfFiles * self.tasksDone))
         
@@ -2705,13 +2746,24 @@ class QuadrantFoldingGUI(QMainWindow):
                 self.filenameLineEdit2.setEnabled(True)
                 self.csvManager.sortCSV()
             
+
     def startNextTask(self):
+
         self.progressBar.setVisible(True)
         self.filenameLineEdit.setEnabled(False)
         self.filenameLineEdit2.setEnabled(False)
+
+        
         while not self.tasksQueue.empty() and self.threadPool.activeThreadCount() < self.threadPool.maxThreadCount() / 2:
             params = self.tasksQueue.get()
-            self.currentTask = Worker(params)
+            
+
+            #Nick Allison:
+            #Pass the calib center from the previous image into the worker thread that will process the next one
+            #This is used to maintaing a fixed center while provessing a folder if needed.
+            calib_center = None if self.quadFold is None else self.quadFold.info['calib_center']
+            self.currentTask = Worker(params, self.calSettingsDialog.fixedCenter.isChecked(), calib_center)
+
             self.currentTask.signals.result.connect(self.thread_done)
             self.currentTask.signals.finished.connect(self.thread_finished)
             
